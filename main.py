@@ -1,59 +1,70 @@
-"""# main.py - Build the 1024x1024 front-page news image for 21 November 2026
-# Packed single-file version. The grader runs with python3 -P, so no sibling imports
-# are allowed. Canvas, 5x7 bitmap font and the PNG encoder are inlined here,
-# plus four scenes drawn fresh for Saturday 21 November 2026.
+"""main.py - front-page news image for Saturday 21 November 2026.
+
+Single self-contained program: standard library only, no network, no
+randomness, deterministic output. It draws "THE WORLD TODAY" - a navy
+masthead with a gold date line, four flat-illustration panels with
+two-line captions, and a dark ticker bar - and writes entry.png under
+MAKEFUN_OUTPUT_DIR (default /output). The grader runs it with
+`python3 -P -s main.py` twice; both runs must write identical bytes.
 """
 
-import os
 import math
+import os
 import struct
 import zlib
 
 
-# =====================================================================
-# INLINED: canvas.py
-# =====================================================================
+# ---------------------------------------------------------------------
+# Raster surface: one flat list of RGB tuples plus shape helpers.
+# ---------------------------------------------------------------------
 
 class Canvas:
+    """A width x height RGB surface stored as a single flat list."""
+
     def __init__(self, width, height, background):
         self.width = width
         self.height = height
         self.bg = background
-        self.buf = [[background for _ in range(width)] for _ in range(height)]
+        self.px = [background] * (width * height)
 
     @property
     def pixels(self):
-        return self.buf
+        w = self.width
+        return [self.px[y * w:(y + 1) * w] for y in range(self.height)]
 
     def rect(self, x, y, w, h, colour):
-        x0 = max(0, int(x))
-        y0 = max(0, int(y))
-        x1 = min(self.width, int(x + w))
-        y1 = min(self.height, int(y + h))
-        buf = self.buf
-        for r in range(y0, y1):
-            row = buf[r]
-            for c in range(x0, x1):
-                row[c] = colour
+        left = max(0, int(x))
+        top = max(0, int(y))
+        right = min(self.width, int(x + w))
+        bottom = min(self.height, int(y + h))
+        if right <= left or bottom <= top:
+            return
+        span = [colour] * (right - left)
+        buf = self.px
+        stride = self.width
+        for row in range(top, bottom):
+            base = row * stride
+            buf[base + left:base + right] = span
 
     def circle(self, cx, cy, r, colour):
         cx = int(cx)
         cy = int(cy)
         r = int(r)
-        r2 = r * r
-        x0 = max(0, cx - r)
-        x1 = min(self.width, cx + r + 1)
-        y0 = max(0, cy - r)
-        y1 = min(self.height, cy + r + 1)
-        buf = self.buf
-        for y in range(y0, y1):
+        rsq = r * r
+        left = max(0, cx - r)
+        right = min(self.width, cx + r + 1)
+        top = max(0, cy - r)
+        bottom = min(self.height, cy + r + 1)
+        buf = self.px
+        stride = self.width
+        for y in range(top, bottom):
             dy = y - cy
             dy2 = dy * dy
-            row = buf[y]
-            for x in range(x0, x1):
+            base = y * stride
+            for x in range(left, right):
                 dx = x - cx
-                if dx*dx + dy2 <= r2:
-                    row[x] = colour
+                if dx * dx + dy2 <= rsq:
+                    buf[base + x] = colour
 
     def ellipse(self, cx, cy, rx, ry, colour):
         cx = int(cx)
@@ -62,520 +73,161 @@ class Canvas:
         ry = int(ry)
         if rx <= 0 or ry <= 0:
             return
-        rx2 = rx * rx
-        ry2 = ry * ry
-        x0 = max(0, cx - rx)
-        x1 = min(self.width, cx + rx + 1)
-        y0 = max(0, cy - ry)
-        y1 = min(self.height, cy + ry + 1)
-        buf = self.buf
-        for y in range(y0, y1):
+        rxs = rx * rx
+        rys = ry * ry
+        left = max(0, cx - rx)
+        right = min(self.width, cx + rx + 1)
+        top = max(0, cy - ry)
+        bottom = min(self.height, cy + ry + 1)
+        buf = self.px
+        stride = self.width
+        for y in range(top, bottom):
             dy = y - cy
-            dy2 = dy * ry2
-            row = buf[y]
-            for x in range(x0, x1):
+            base = y * stride
+            for x in range(left, right):
                 dx = x - cx
-                if (dx * dx) * ry2 + dy2 * rx2 <= rx2 * ry2:
-                    row[x] = colour
+                if dx * dx * rys + dy * rys * rxs <= rxs * rys:
+                    buf[base + x] = colour
 
     def line(self, x1, y1, x2, y2, colour, width=1):
-        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
-        dx = x2 - x1
-        dy = y2 - y1
-        dist = math.hypot(dx, dy)
-        if dist == 0:
-            self.rect(x1 - width/2, y1 - width/2, width, width, colour)
+        ax, ay, bx, by = float(x1), float(y1), float(x2), float(y2)
+        dx = bx - ax
+        dy = by - ay
+        length = math.hypot(dx, dy)
+        if length == 0:
+            self.rect(ax - width / 2, ay - width / 2, width, width, colour)
             return
-        steps = int(dist * 2) + 1
-        hw = width / 2.0
+        steps = int(length * 2) + 1
+        half = width / 2.0
         for i in range(steps + 1):
             t = i / steps
-            x = x1 + t * dx
-            y = y1 + t * dy
-            self.rect(x - hw, y - hw, width, width, colour)
+            self.rect(ax + t * dx - half, ay + t * dy - half,
+                      width, width, colour)
 
     def polygon(self, points, colour):
         if not points:
             return
-        min_y = max(0, int(min(p[1] for p in points)))
-        max_y = min(self.height - 1, int(max(p[1] for p in points)))
         n = len(points)
-        buf = self.buf
-        for y in range(min_y, max_y + 1):
-            node_x = []
-            j = n - 1
-            for i in range(n):
-                xi, yi = points[i]
-                xj, yj = points[j]
+        top = max(0, int(min(p[1] for p in points)))
+        bottom = min(self.height - 1, int(max(p[1] for p in points)))
+        buf = self.px
+        stride = self.width
+        for y in range(top, bottom + 1):
+            crossings = []
+            prev = n - 1
+            for cur in range(n):
+                xi, yi = points[cur]
+                xj, yj = points[prev]
                 if (yi < y and yj >= y) or (yj < y and yi >= y):
                     if yj != yi:
-                        node_x.append(xi + (y - yi) / (yj - yi) * (xj - xi))
-                j = i
-            node_x.sort()
-            for k in range(0, len(node_x) - 1, 2):
-                x_start = max(0, int(node_x[k]))
-                x_end = min(self.width, int(node_x[k+1]) + 1)
-                row = buf[y]
-                for x in range(x_start, x_end):
-                    row[x] = colour
+                        crossings.append(xi + (y - yi) / (yj - yi) * (xj - xi))
+                prev = cur
+            crossings.sort()
+            for k in range(0, len(crossings) - 1, 2):
+                start = max(0, int(crossings[k]))
+                end = min(self.width, int(crossings[k + 1]) + 1)
+                base = y * stride
+                for x in range(start, end):
+                    buf[base + x] = colour
 
 
-# =====================================================================
-# INLINED: font.py
-# =====================================================================
+# ---------------------------------------------------------------------
+# 5x7 bitmap type. Each glyph is (width, seven row bitmasks) with the
+# most significant bit as the leftmost column; '$' is six columns wide,
+# everything else five. Same letterforms as the earlier entries' font,
+# re-encoded here as integers.
+# ---------------------------------------------------------------------
 
-GLYPHS = {
-    'A': [
-        ".###.",
-        "#...#",
-        "#...#",
-        "#####",
-        "#...#",
-        "#...#",
-        "#...#"
-    ],
-    'B': [
-        "####.",
-        "#...#",
-        "#...#",
-        "####.",
-        "#...#",
-        "#...#",
-        "####."
-    ],
-    'C': [
-        ".####",
-        "#....",
-        "#....",
-        "#....",
-        "#....",
-        "#....",
-        ".####"
-    ],
-    'D': [
-        "####.",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        "####."
-    ],
-    'E': [
-        "#####",
-        "#....",
-        "#....",
-        "####.",
-        "#....",
-        "#....",
-        "#####"
-    ],
-    'F': [
-        "#####",
-        "#....",
-        "#....",
-        "####.",
-        "#....",
-        "#....",
-        "#...."
-    ],
-    'G': [
-        ".####",
-        "#....",
-        "#....",
-        "#.###",
-        "#...#",
-        "#...#",
-        ".####"
-    ],
-    'H': [
-        "#...#",
-        "#...#",
-        "#...#",
-        "#####",
-        "#...#",
-        "#...#",
-        "#...#"
-    ],
-    'I': [
-        "#####",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#..",
-        "#####"
-    ],
-    'J': [
-        "..###",
-        "...#.",
-        "...#.",
-        "...#.",
-        "...#.",
-        "#..#.",
-        ".##.."
-    ],
-    'K': [
-        "#...#",
-        "#..#.",
-        "#.#..",
-        "##...",
-        "#.#..",
-        "#..#.",
-        "#...#"
-    ],
-    'L': [
-        "#....",
-        "#....",
-        "#....",
-        "#....",
-        "#....",
-        "#....",
-        "#####"
-    ],
-    'M': [
-        "#...#",
-        "##.##",
-        "#.#.#",
-        "#.#.#",
-        "#...#",
-        "#...#",
-        "#...#"
-    ],
-    'N': [
-        "#...#",
-        "##..#",
-        "#.#.#",
-        "#..##",
-        "#...#",
-        "#...#",
-        "#...#"
-    ],
-    'O': [
-        ".###.",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        ".###."
-    ],
-    'P': [
-        "####.",
-        "#...#",
-        "#...#",
-        "####.",
-        "#....",
-        "#....",
-        "#...."
-    ],
-    'Q': [
-        ".###.",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#.#.#",
-        "#..#.",
-        ".##.#"
-    ],
-    'R': [
-        "####.",
-        "#...#",
-        "#...#",
-        "####.",
-        "#.#..",
-        "#..#.",
-        "#...#"
-    ],
-    'S': [
-        ".####",
-        "#....",
-        "#....",
-        ".###.",
-        "....#",
-        "....#",
-        "####."
-    ],
-    'T': [
-        "#####",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#.."
-    ],
-    'U': [
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        ".###."
-    ],
-    'V': [
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        "#...#",
-        ".#.#.",
-        "..#.."
-    ],
-    'W': [
-        "#...#",
-        "#...#",
-        "#...#",
-        "#.#.#",
-        "#.#.#",
-        "##.##",
-        "#...#"
-    ],
-    'X': [
-        "#...#",
-        "#...#",
-        ".#.#.",
-        "..#..",
-        ".#.#.",
-        "#...#",
-        "#...#"
-    ],
-    'Y': [
-        "#...#",
-        "#...#",
-        ".#.#.",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#.."
-    ],
-    'Z': [
-        "#####",
-        "....#",
-        "...#.",
-        "..#..",
-        ".#...",
-        "#....",
-        "#####"
-    ],
-    '0': [
-        ".###.",
-        "#..##",
-        "#.#.#",
-        "#.##.#",
-        "##..#",
-        "#...#",
-        ".###."
-    ],
-    '1': [
-        "..#..",
-        ".##..",
-        "..#..",
-        "..#..",
-        "..#..",
-        "..#..",
-        "#####"
-    ],
-    '2': [
-        ".###.",
-        "#...#",
-        "....#",
-        "..##.",
-        ".#...",
-        "#....",
-        "#####"
-    ],
-    '3': [
-        "#####",
-        "....#",
-        "...#.",
-        "..##.",
-        "....#",
-        "#...#",
-        ".###."
-    ],
-    '4': [
-        "#....",
-        "#...#",
-        "#...#",
-        "#####",
-        "....#",
-        "....#",
-        "....#"
-    ],
-    '5': [
-        "#####",
-        "#....",
-        "####.",
-        "....#",
-        "....#",
-        "#...#",
-        ".###."
-    ],
-    '6': [
-        ".###.",
-        "#....",
-        "#....",
-        "####.",
-        "#...#",
-        "#...#",
-        ".###."
-    ],
-    '7': [
-        "#####",
-        "....#",
-        "...#.",
-        "..#..",
-        ".#...",
-        ".#...",
-        ".#..."
-    ],
-    '8': [
-        ".###.",
-        "#...#",
-        "#...#",
-        ".###.",
-        "#...#",
-        "#...#",
-        ".###."
-    ],
-    '9': [
-        ".###.",
-        "#...#",
-        "#...#",
-        ".####",
-        "....#",
-        "....#",
-        ".###."
-    ],
-    '$': [
-        "..#..",
-        ".#####",
-        "#.#..",
-        ".###.",
-        "..#.#",
-        "#####",
-        "..#.."
-    ],
-    '%': [
-        "##..#",
-        "##.#.",
-        "...#.",
-        "..#..",
-        ".#...",
-        ".#...",
-        "#..##"
-    ],
-    '.': [
-        ".....",
-        ".....",
-        ".....",
-        ".....",
-        ".....",
-        "..#..",
-        "..#.."
-    ],
-    ',': [
-        ".....",
-        ".....",
-        ".....",
-        ".....",
-        "..#..",
-        "..#..",
-        ".#..."
-    ],
-    ':': [
-        ".....",
-        "..#..",
-        "..#..",
-        ".....",
-        "..#..",
-        "..#..",
-        "....."
-    ],
-    '-': [
-        ".....",
-        ".....",
-        ".....",
-        "#####",
-        ".....",
-        ".....",
-        "....."
-    ],
-    '/': [
-        "....#",
-        "....#",
-        "...#.",
-        "..#..",
-        ".#...",
-        "#....",
-        "#...."
-    ],
-    ' ': [
-        ".....",
-        ".....",
-        ".....",
-        ".....",
-        ".....",
-        ".....",
-        "....."
-    ]
+FONT = {
+    ' ': (5, (0, 0, 0, 0, 0, 0, 0)),
+    '$': (6, (4, 31, 20, 14, 5, 31, 4)),
+    '%': (5, (25, 26, 2, 4, 8, 8, 19)),
+    ',': (5, (0, 0, 0, 0, 4, 4, 8)),
+    '-': (5, (0, 0, 0, 31, 0, 0, 0)),
+    '.': (5, (0, 0, 0, 0, 0, 4, 4)),
+    '/': (5, (1, 1, 2, 4, 8, 16, 16)),
+    '0': (5, (14, 19, 21, 21, 25, 17, 14)),
+    '1': (5, (4, 12, 4, 4, 4, 4, 31)),
+    '2': (5, (14, 17, 1, 6, 8, 16, 31)),
+    '3': (5, (31, 1, 2, 6, 1, 17, 14)),
+    '4': (5, (16, 17, 17, 31, 1, 1, 1)),
+    '5': (5, (31, 16, 30, 1, 1, 17, 14)),
+    '6': (5, (14, 16, 16, 30, 17, 17, 14)),
+    '7': (5, (31, 1, 2, 4, 8, 8, 8)),
+    '8': (5, (14, 17, 17, 14, 17, 17, 14)),
+    '9': (5, (14, 17, 17, 15, 1, 1, 14)),
+    ':': (5, (0, 4, 4, 0, 4, 4, 0)),
+    'A': (5, (14, 17, 17, 31, 17, 17, 17)),
+    'B': (5, (30, 17, 17, 30, 17, 17, 30)),
+    'C': (5, (15, 16, 16, 16, 16, 16, 15)),
+    'D': (5, (30, 17, 17, 17, 17, 17, 30)),
+    'E': (5, (31, 16, 16, 30, 16, 16, 31)),
+    'F': (5, (31, 16, 16, 30, 16, 16, 16)),
+    'G': (5, (15, 16, 16, 23, 17, 17, 15)),
+    'H': (5, (17, 17, 17, 31, 17, 17, 17)),
+    'I': (5, (31, 4, 4, 4, 4, 4, 31)),
+    'J': (5, (7, 2, 2, 2, 2, 18, 12)),
+    'K': (5, (17, 18, 20, 24, 20, 18, 17)),
+    'L': (5, (16, 16, 16, 16, 16, 16, 31)),
+    'M': (5, (17, 27, 21, 21, 17, 17, 17)),
+    'N': (5, (17, 25, 21, 19, 17, 17, 17)),
+    'O': (5, (14, 17, 17, 17, 17, 17, 14)),
+    'P': (5, (30, 17, 17, 30, 16, 16, 16)),
+    'Q': (5, (14, 17, 17, 17, 21, 18, 13)),
+    'R': (5, (30, 17, 17, 30, 20, 18, 17)),
+    'S': (5, (15, 16, 16, 14, 1, 1, 30)),
+    'T': (5, (31, 4, 4, 4, 4, 4, 4)),
+    'U': (5, (17, 17, 17, 17, 17, 17, 14)),
+    'V': (5, (17, 17, 17, 17, 17, 10, 4)),
+    'W': (5, (17, 17, 17, 21, 21, 27, 17)),
+    'X': (5, (17, 17, 10, 4, 10, 17, 17)),
+    'Y': (5, (17, 17, 10, 4, 4, 4, 4)),
+    'Z': (5, (31, 1, 2, 4, 8, 16, 31)),
 }
 
-GLYPHS['0'] = [
-    ".###.",
-    "#..##",
-    "#.#.#",
-    "#.#.#",
-    "##..#",
-    "#...#",
-    ".###."
-]
 
-def draw_text(canvas, x, y, text, scale=1, colour=(0,0,0)):
-    cur_x = x
+def draw_text(canvas, x, y, text, scale=1, colour=(0, 0, 0)):
+    pen = x
     for ch in text.upper():
-        glyph = GLYPHS.get(ch, GLYPHS[' '])
-        for r_idx, row in enumerate(glyph):
-            for c_idx, pix in enumerate(row):
-                if pix == '#':
-                    px = cur_x + c_idx * scale
-                    py = y + r_idx * scale
-                    canvas.rect(px, py, scale, scale, colour)
-        cur_x += (5 + 1) * scale
+        width, rows = FONT.get(ch, FONT[' '])
+        for r in range(7):
+            bits = rows[r]
+            for c in range(width):
+                if (bits >> (width - 1 - c)) & 1:
+                    canvas.rect(pen + c * scale, y + r * scale,
+                                scale, scale, colour)
+        pen += 6 * scale
 
 
-# =====================================================================
-# INLINED: pngenc.py
-# =====================================================================
+# ---------------------------------------------------------------------
+# PNG writer: filter-0 scanlines, zlib level 9, minimal chunk set.
+# ---------------------------------------------------------------------
+
+def _png_chunk(tag, data):
+    body = tag + data
+    return (struct.pack('>I', len(data)) + body +
+            struct.pack('>I', zlib.crc32(body) & 0xFFFFFFFF))
+
 
 def write_png(path, width, height, pixels):
-    raw_data = bytearray()
+    raw = bytearray()
     for row in pixels:
-        raw_data.append(0) # filter type 0 (none)
-        for r, g, b in row:
-            raw_data.extend(bytes((r, g, b)))
+        raw.append(0)
+        for (r, g, b) in row:
+            raw += bytes((r, g, b))
+    packed = zlib.compress(bytes(raw), 9)
+    header = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+    blob = bytearray(b'\x89PNG\r\n\x1a\n')
+    blob += _png_chunk(b'IHDR', header)
+    blob += _png_chunk(b'IDAT', packed)
+    blob += _png_chunk(b'IEND', b'')
+    with open(path, 'wb') as handle:
+        handle.write(blob)
 
-    compressed = zlib.compress(bytes(raw_data), level=9)
 
-    def chunk(tag, data):
-        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF)
-
-    ihdr = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-
-    png_bytes = bytearray()
-    png_bytes.extend(b'\x89PNG\r\n\x1a\n')
-    png_bytes.extend(chunk(b'IHDR', ihdr))
-    png_bytes.extend(chunk(b'IDAT', compressed))
-    png_bytes.extend(chunk(b'IEND', b''))
-
-    with open(path, 'wb') as f:
-        f.write(png_bytes)
-
-# =====================================================================
-# NEW SCENES for 21 November 2026 (written fresh for this entry)
-# =====================================================================
+# ---------------------------------------------------------------------
+# Scenes for 21 November 2026.
+# ---------------------------------------------------------------------
 
 def draw_cartel(canvas, x, y, w, h):
     # Mexico captures cartel boss "El Chapo Isidro" overnight in Sinaloa:
@@ -586,7 +238,9 @@ def draw_cartel(canvas, x, y, w, h):
     rock = (28, 26, 40)
     beam = (250, 240, 180)
     beam_edge = (210, 195, 130)
-    heli = (40, 44, 52)
+    # helicopter body, lightened so the silhouette reads against the
+    # dark night-sky bands instead of blending into them
+    heli = (62, 68, 80)
     truck = (150, 40, 45)
     moon = (235, 230, 200)
     star = (220, 220, 235)
@@ -886,9 +540,9 @@ def draw_mercury(canvas, x, y, w, h):
     canvas.circle(px - 8, py - 38, 3, (255, 120, 80))
 
 
-# =====================================================================
-# MAIN ENTRY POINT (21 November 2026)
-# =====================================================================
+# ---------------------------------------------------------------------
+# Page assembly (21 November 2026).
+# ---------------------------------------------------------------------
 
 def build_entry():
     width = 1024
